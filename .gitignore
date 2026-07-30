@@ -18,6 +18,7 @@ build/
 # Data artifacts (keep eval/.gitkeep)
 data/cache/
 data/corpus/**
+!data/corpus/.gitkeep
 data/exports/**
 data/eval/**
 !data/eval/.gitkeep

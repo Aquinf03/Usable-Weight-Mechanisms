@@ -1,4 +1,4 @@
-"""Trigger: when does a tile_svd mount fire on real MLP intermediates?"""
+"""Trigger: when does a tile_svd mount fire on real site inputs?"""
 
 from __future__ import annotations
 
@@ -11,9 +11,9 @@ def mode_trigger_coeffs(
     intermediate: np.ndarray,
     mounts: list[RawMount],
 ) -> np.ndarray:
-    """Project MLP intermediate onto each mode's right singular vector.
+    """Project site inputs onto each mode's right singular vector.
 
-    intermediate: (n_tokens, d_mlp)
+    intermediate: (n_tokens, d_in) - hooked inputs to the linear site
     returns: (n_tokens, n_mounts) trigger coefficients
     """
     x = np.asarray(intermediate, dtype=np.float64)

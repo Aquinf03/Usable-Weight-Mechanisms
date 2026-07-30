@@ -1,4 +1,4 @@
-"""Coverage: how much of W and real MLP writes do mounts explain?"""
+"""Coverage: how much of W and real site writes do mounts explain?"""
 
 from __future__ import annotations
 
@@ -47,7 +47,7 @@ def sparse_write_coverage(
 ) -> dict[str, Any]:
     """Fraction of write energy explained by top-k mounts (least-squares).
 
-    writes: (n_tokens, d) residual writes (e.g. MLP outputs)
+    writes: (n_tokens, d) site module outputs (residual writes for mlp.down / attn.o)
     directions: (n_mounts, d) unit write directions
 
     For each token, pick the k mounts with largest |<w, d_i>|, then solve

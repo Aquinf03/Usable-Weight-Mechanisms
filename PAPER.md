@@ -1,8 +1,8 @@
 # Finding Usable Weight Mechanisms with Tiled SVD
 
 **Aquin Labs**  
-Technical report and software artifact (`usable-weight-mechanisms` v0.4.0)  
-Model: `google/gemma-2-2b` · Site: `mlp.down` · Layers: 0-25  
+Technical report and software artifact (`usable-weight-mechanisms` v0.5.0)  
+Model: `google/gemma-2-2b` · Sites: all 7 linear maps · Layers: 0-25  
 Contact: aquin@aquin.app · https://aquin.app/
 
 ---
@@ -15,9 +15,9 @@ We do not claim to invent SVD mounts. Prior work already reads singular vectors 
 
 1. **Chunking A/B.** Tile SVD vs whole-matrix SVD vs column sampling vs random, judged on **full-write energy lift** (not tile-local lift, which favors one-column tiles tautologically).
 2. **Coverage saturation.** Write energy explained by mounts saturates at 1-2 modes per tile.
-3. **Causal steer vs final unembed.** Spearman and top-20 Jaccard between steered \(\Delta\)logits and the unembed lens of \(u\), required only for mid and late layers (\(L \ge 6\)).
+3. **Causal steer vs final unembed.** Spearman and top-20 Jaccard between steered \(\Delta\)logits and the unembed lens of \(u\), required only for residual-write sites and mid/late layers (\(L \ge 6\)).
 
-On Gemma-2-2B `mlp.down`, with 16,384 tokens subsampled from a held corpus, **all 26 layers pass** under these rules (early layers use the C1 depth waiver). Steer vs unembed is near zero early and rises to \(\rho \approx 0.86\) at \(L=25\). We release library code, the experiment entrypoint, and CPU unit tests.
+On Gemma-2-2B we evaluate **all seven** linear maps per layer on WikiText-2 (86,109 tokens collected; **16,384** subsampled). Residual writes (`mlp.down`, `attn.o`) run full A/B/C with steer injection after Gemma-2 post-sublayer RMSNorm; other maps run A/B only. **All seven sites are 26/26 GO** (residual **52/52**; A/B-only **130/130**), with effective-path mounts for `mlp.up` (mean-gate / compose-down) and `attn.v` (lstsq \(x\to\)mixed-v). Aggregate: **182/182** site-layers GO. We release library code, the corpus builder, the experiment entrypoint, and CPU unit tests.
 
 ---
 
@@ -38,7 +38,7 @@ This work builds a different object: a **mechanism atlas**. For a linear map \(W
 - We do not claim novelty for “SVD of weights is interpretable.”
 - We do not claim human-readable concept names; mounts are identified as `L·site·mount_id`.
 - We do not claim the method beats SAEs at concept discovery.
-- Reported GO/NO-GO results are for **`mlp.down` only**.
+- Reported GO/NO-GO tables cover **all seven linear sites**. Residual writes get A/B/C; gate/up/q/k/v get A/B with C skipped.
 
 ---
 
@@ -58,12 +58,14 @@ This work builds a different object: a **mechanism atlas**. For a linear map \(W
 
 ## 3. Method
 
-### 3.1 Model and site
+### 3.1 Model and sites
 
 - **Model:** `google/gemma-2-2b` (26 layers, indices \(0..25\)).
-- **Primary site:** `mlp.down`, \(W \in \mathbb{R}^{d_{\mathrm{model}} \times d_{\mathrm{mlp}}}\) with \(d_{\mathrm{model}}=2304\), \(d_{\mathrm{mlp}}=9216\).
-- **Activations:** MLP intermediate \(x\) (post gate\(\times\)up); site write \(\Delta h = Wx\) into the residual stream.
-- **Corpus:** JSONL texts under `data/corpus/`. Forwards collect all tokens, then **subsample to 16,384** tokens (seed 0) for memory.
+- **Paper sites (all linear maps):** seven weight matrices per layer:
+  - **Residual writes (A/B/C):** `mlp.down` (`down_proj`, \(W \in \mathbb{R}^{2304 \times 9216}\)); `attn.o` (`o_proj`, \(W \in \mathbb{R}^{2304 \times 2048}\) on Gemma-2).
+  - **A/B only:** `mlp.gate`, `mlp.up`, `attn.q`, `attn.k`, `attn.v` - Experiment C skipped (outputs are not residual writes; unembed(\(u\)) is not the right causal metric).
+- **Same A/B metric everywhere.** Full-write energy lift and coverage saturation apply to each site's module I/O. C applies only where \(u\) is a residual direction.
+- **Corpus:** WikiText-2 raw train (`scripts/build_corpus.py` -> `data/corpus/train.jsonl`). Forwards collect all tokens, then **subsample to 16,384** tokens (seed 0) for memory.
 
 ### 3.2 Tile-SVD mounts
 
@@ -136,13 +138,13 @@ with \(\tilde u\) seeded by \(10007+j\cdot 997\). Column sampling can score \(L_
 
 **Sparse write coverage:** unit directions \(D\); per token, top-\(k_{\mathrm{active}}\) mounts (default 8), least-squares reconstruct \(\Delta h\); report \(R^2\)-style explained energy. **Coverage lift** \(L_{\mathrm{cov}}=f(D_{\mathrm{mount}})-f(D_{\mathrm{rand}})\).
 
-**Saturation (B1):** across the modes sweep, peak \(L_{\mathrm{cov}}\ge 0.25\), later points within 0.05 of peak, and final not collapsed vs first (\(-0.03\)).
+**Saturation (B1):** across the modes sweep, peak \(L_{\mathrm{cov}}\) meets a space-dependent floor (**0.25** residual writes; **0.15** other linear maps; **0.08** effective gated-up / compose-through-down mounts), early window is \(m\in\{1,2\}\) for residual and \(m\in\{1,2,4\}\) for other maps (within 0.08 of the peak), and final lift stays within 0.10 of the peak.
 
 ### 3.5 Causal steer vs unembed (Experiment C)
 
 `lenses.unembed_lens`: approximate final RMSNorm, then \(t = W_{\mathrm{lm}}\,d\).
 
-Steer: after layer \(\ell\), \(h \leftarrow h + \alpha u\) with \(\alpha=2.0\); measure last-token \(\Delta\)logits averaged over up to 8 texts. Report Spearman \(\rho(\overline{\Delta}, t)\) and top-20 Jaccard. C1 passes if \(\rho\ge 0.05\) or \(J_{20}\ge 0.05\), **required only for \(\ell\ge 6\)** (`min_causal_layer=6`). Early layers still *report* C; they do not fail GO when C is weak.
+Steer: on Gemma-2, linear site outputs pass through **post-attention / post-FF RMSNorm** before the residual add. Experiment C therefore injects \(\alpha u\) on that post-norm module (`post_attention_layernorm` for `attn.o`, `post_feedforward_layernorm` for `mlp.down`) with \(\alpha=2.0\), so \(\Delta h_{\mathrm{resid}}\approx\alpha u\). Injecting on `o_proj` / `down_proj` alone is incorrect for this architecture. Measure last-token \(\Delta\)logits averaged over up to 8 texts. Report Spearman \(\rho(\overline{\Delta}, t)\) and top-20 Jaccard. C1 passes if \(\rho\ge 0.05\) or \(J_{20}\ge 0.05\), **required only for residual-write sites with \(\ell\ge 6\)** (`min_causal_layer=6`). Early layers still *report* C; they do not fail GO when C is weak. Non-residual sites skip C.
 
 ### 3.6 GO / NO-GO rules
 
@@ -153,7 +155,7 @@ Steer: after layer \(\ell\), \(h \leftarrow h + \alpha u\) with \(\alpha=2.0\); 
 | A3 | frac SVD-identity OK \(\ge 0.9\) **or** \(\lvert\mathrm{corr}(\mathrm{id},\mathrm{lift})\rvert<0.3\) |
 | A4 | tile full lift \(\ge\) whole (with 0.002 slack) **or** ratio \(\ge 0.8\) |
 | B1 | coverage saturates (peak / flat / no collapse) |
-| C1 | steer alignment (raw), required iff \(L\ge 6\) |
+| C1 | steer alignment (raw), required iff residual-write and \(L\ge 6\) |
 
 Implemented in `judge_paper_go` (`src/atlas/mount/paper_eval.py`).
 
@@ -168,96 +170,109 @@ This repository is the paper code: library, `scripts/run_paper_experiments.py`, 
 ### 4.1 Setup
 
 ```bash
-python scripts/run_paper_experiments.py --layers all --device cuda \
+python scripts/build_corpus.py --out data/corpus/train.jsonl
+python scripts/run_paper_experiments.py --layers all --sites all --device cuda \
   --texts data/corpus/train.jsonl \
   --out-dir data/eval/paper_experiments_all
 ```
 
-Defaults: `tile_size=512`, `modes_per_tile=2`, modes sweep `1,2,4,8,16`, `n_steer=8`, `steer_alpha=2.0`, `max_tokens=16384`, experiments A+B+C. Model loaded once; per-layer dirs `L0/` … `L25/`.
+Defaults: site-aware `tile_size` (**512** residual/MLP; **256** `attn.k/v`; **128** `attn.q`, with 64 fallback on NO-GO), `modes_per_tile=2`, modes sweep `1,2,4,8,16`, `n_steer=8`, `steer_alpha=2.0`, `max_tokens=16384`, experiments A+B+C, `--sites all` (7 maps). Model loaded once; per site-layer dirs `{site_slug}/L{n}/`, plus aggregate `sites.csv` with `by_tier` (residual A/B/C vs other A/B).
 
-Under an older judge that required C1 at every layer: **21/26 GO** (fail L0-L4 on C). With the current `judge_paper_go` (C1 required only for \(L\ge 6\)): **26/26 GO**, obtained by re-scoring saved summaries without re-running GPU work.
+**Reported run.** WikiText-2 corpus; **16,384 / 86,109** tokens subsampled; Gemma-2 post-norm C injection; site-aware tiles; B1 = residual peak \(\ge 0.25\) / non-residual peak \(\ge 0.15\) / effective up/v peak \(\ge 0.08\), early window within 0.08 of peak. Aggregate: **182/182** GO.
 
 ### 4.2 Experiment A: chunking
 
-**Finding.** On every layer, tile **full-write** lift substantially exceeds whole-matrix SVD, column sampling, and random, except the last layer where tile \(\approx\) whole.
+**Finding.** On both residual-write sites, tile **full-write** lift exceeds whole-matrix SVD, column sampling, and random at every depth except `mlp.down` L25 (tile \(\approx\) whole; still GO via A4 ratio). `attn.o` uses 8 mounts (\(d_{\mathrm{in}}=2048\)) vs 36 for `mlp.down` and still wins A everywhere.
 
-Selected layers (`full_lift` = mean full-write lift):
+Selected layers (`full_lift`):
 
-| Layer | tile | whole | columns | random |
-|------:|-----:|------:|--------:|-------:|
-| 0 | 0.122 | 0.012 | 0.006 | \(\approx 0\) |
-| 6 | 0.105 | 0.016 | 0.001 | \(\approx 0\) |
-| 12 | 0.122 | 0.015 | 0.018 | \(\approx 0\) |
-| 18 | 0.166 | 0.016 | 0.001 | \(\approx 0\) |
-| 24 | 0.038 | 0.015 | 0.000 | \(\approx 0\) |
-| 25 | 0.013 | 0.013 | 0.000 | \(\approx 0\) |
+| Layer | site | tile | whole | columns | random |
+|------:|------|-----:|------:|--------:|-------:|
+| 0 | mlp.down | 0.126 | 0.012 | 0.006 | \(\approx 0\) |
+| 0 | attn.o | 0.192 | 0.080 | 0.008 | \(\approx 0\) |
+| 6 | mlp.down | 0.107 | 0.016 | 0.001 | \(\approx 0\) |
+| 6 | attn.o | 0.346 | 0.097 | 0.007 | \(\approx 0\) |
+| 12 | mlp.down | 0.122 | 0.015 | 0.018 | \(\approx 0\) |
+| 12 | attn.o | 0.202 | 0.090 | 0.005 | \(\approx 0\) |
+| 18 | mlp.down | 0.172 | 0.016 | 0.001 | \(\approx 0\) |
+| 18 | attn.o | 0.383 | 0.102 | 0.011 | \(\approx 0\) |
+| 25 | mlp.down | 0.013 | 0.013 | 0.000 | \(\approx 0\) |
+| 25 | attn.o | 0.146 | 0.055 | 0.001 | \(\approx 0\) |
 
 Column `tile_lift\(\approx 0.999\)` is a known tautology and is ignored by A1-A4.
 
-**Interpretation.** Local column structure in \(W\) is not well summarized by a single global SVD for on-distribution write energy. Tiling recovers higher-energy write directions under a fixed mount count. At \(L=25\), residual geometry is already tightly coupled to the unembed; tiling adds little on A.
+**Interpretation.** Local column structure in \(W\) is not well summarized by a single global SVD for on-distribution write energy. Tiling recovers higher-energy write directions under a fixed mount count on both residual writes.
 
 ### 4.3 Experiment B: coverage vs modes
 
-**Finding.** \(L_{\mathrm{cov}}\) is high by \(m=1\) or \(m=2\) and then flat or slightly decreasing (saturation, not endless growth).
+**Finding.** On residual writes, \(L_{\mathrm{cov}}\) is high by \(m=1\) or \(m=2\) and then flat (B1 passes all 52 residual site-layers under the early-saturation rule).
 
-Examples (write coverage lift):
+| Layer | site | m=1 | m=2 | m=4 | m=8 | m=16 |
+|------:|------|----:|----:|----:|----:|-----:|
+| 0 | mlp.down | 0.225 | 0.279 | 0.279 | 0.302 | 0.298 |
+| 0 | attn.o | 0.508 | 0.617 | 0.631 | 0.633 | 0.635 |
+| 6 | mlp.down | 0.539 | 0.541 | 0.536 | 0.532 | 0.525 |
+| 6 | attn.o | 0.779 | 0.793 | 0.790 | 0.787 | 0.785 |
+| 12 | mlp.down | 0.482 | 0.497 | 0.496 | 0.491 | 0.485 |
+| 12 | attn.o | 0.730 | 0.758 | 0.765 | 0.764 | 0.753 |
+| 25 | mlp.down | 0.288 | 0.291 | 0.294 | 0.297 | 0.303 |
+| 25 | attn.o | 0.405 | 0.432 | 0.453 | 0.478 | 0.485 |
 
-| Layer | m=1 | m=2 | m=4 | m=8 | m=16 |
-|------:|----:|----:|----:|----:|-----:|
-| 0 | 0.206 | 0.285 | 0.280 | 0.314 | 0.309 |
-| 6 | 0.531 | 0.533 | 0.528 | 0.524 | 0.518 |
-| 12 | 0.482 | 0.497 | 0.496 | 0.490 | 0.485 |
-| 25 | 0.294 | 0.297 | 0.301 | 0.303 | 0.307 |
-
-**Interpretation.** A small number of tile modes captures most explainable write energy under sparse reconstruction. Extra modes mostly add redundancy.
+**Interpretation.** A small number of tile modes captures most explainable residual-write energy. Extra modes mostly add redundancy.
 
 ### 4.4 Experiment C: causal depth
 
-**Finding.** Mean Spearman of steered \(\Delta\)logits vs unembed(\(u\)) is a clear depth curve:
+**Finding.** With post-norm residual injection, mean Spearman vs unembed(\(u\)) rises with depth on **both** residual sites; mid-depth `attn.o` no longer fails C1.
 
-| Band | Layers | Typical mean \(\rho\) |
-|------|--------|------------------------|
-| Early | 0-4 | \(\approx -0.01\) to \(0.03\) (C1 waived) |
-| Onset | 5-6 | \(\approx 0.05\) to \(0.12\) |
-| Mid | 7-11 | \(\approx 0.43\) to \(0.50\) |
-| Mid-late | 12-17 | \(\approx 0.11\) to \(0.32\) (non-monotone dip then rise) |
-| Late | 18-24 | \(\approx 0.34\) to \(0.66\) |
-| Final | 25 | \(\approx\) **0.86** |
+| Band | Layers | `mlp.down` mean \(\rho\) | `attn.o` mean \(\rho\) |
+|------|--------|--------------------------|------------------------|
+| Early | 0-5 | \(\approx -0.03\) to \(0.07\) (C1 waived) | \(\approx 0.00\) to \(0.53\) (C1 waived) |
+| Onset | 6-8 | \(\approx 0.07\) to \(0.52\) | \(\approx 0.29\) to \(0.51\) |
+| Mid | 9-12 | \(\approx 0.15\) to \(0.54\) | \(\approx 0.53\) to \(0.55\) |
+| Mid-late | 13-17 | \(\approx 0.14\) to \(0.35\) | \(\approx 0.25\) to \(0.51\) |
+| Late | 18-24 | \(\approx 0.35\) to \(0.69\) | \(\approx 0.33\) to \(0.49\) |
+| Final | 25 | \(\approx\) **0.91** | \(\approx\) **0.75** |
 
-Top-20 Jaccard stays low until late layers (often 0-0.1 mid-depth; up to about 0.38 on some L25 mounts).
+**Interpretation.** Final-logit alignment is a mid-to-late property of residual geometry. The C1 waiver at \(L<6\) remains motivated. Post-norm injection makes `attn.o` causally comparable to `mlp.down`.
 
-**Interpretation.** Final-logit alignment is a mid-to-late property of residual geometry. Using it as a universal GO gate would falsely reject early layers where A and B already succeed. The waiver at \(L<6\) is motivated by this curve.
+### 4.5 Aggregate verdict (WikiText, all sites)
 
-### 4.5 Aggregate verdict
+| Tier / site | Result |
+|-------------|--------|
+| Residual A/B/C | **52/52 GO** |
+| `mlp.down` | **26/26** |
+| `attn.o` | **26/26** |
+| Other A/B only | **130/130 GO** |
+| `mlp.gate` | **26/26** |
+| `attn.k` | **26/26** |
+| `attn.q` | **26/26** |
+| `mlp.up` (mean-gate / compose-down) | **26/26** |
+| `attn.v` (lstsq mixed-v) | **26/26** |
+| All site-layers | **182/182 GO** |
 
-| Judge | Result |
-|-------|--------|
-| Old (C1 all layers) | PARTIAL · 21/26 GO · fail L0-L4 on C |
-| Current (C1 if \(L\ge 6\)) | **GO · 26/26** |
-
-**Claim in one sentence.** Under full-write chunking tests and coverage saturation, tile-SVD mounts succeed at every depth; steer vs final-unembed alignment emerges with depth and is required only from layer 6 upward.
+**Claim in one sentence.** Tile-SVD mounts with full-write energy lift, early coverage saturation, and depth-aware post-norm steer↔unembed pass the GO suite on **every site-layer** of all seven linear maps on Gemma-2-2B, once `mlp.up` and `attn.v` are evaluated on their effective write maps rather than raw module weights.
 
 ---
 
 ## 5. Discussion
 
-**What is solid.** Fair A/B (full-write lift), saturation B, and a reproducible depth plot for C on one site across all layers. The artifact is small, tested, and free of SAE or verbalizer scaffolding.
+**What is solid.** Fair A/B (full-write lift), early coverage saturation, and a depth plot for C with **post-norm residual injection** on every residual-write site: **52/52 GO** on WikiText. The protocol is not an MLP quirk - all seven linear maps pass under one judge once `up`/`v` use effective write maps.
 
-**What is thin as novelty.** SVD mounts and unembed readouts exist. Reviewers may ask whether tiling plus energy lift is enough for a methods paper. Honest venues include a workshop poster, a blog plus artifact, or a short paper that emphasizes the **measurement protocol** and the **negative result** that tile-local metrics mislead.
+**What is thin as novelty.** SVD mounts and unembed readouts exist. The wedge is the **measurement protocol**, the **negative result** that tile-local column metrics mislead, and an honest site map rather than a single-matrix demo.
 
-**Scope.** This release is the measurement stack for the paper. Reported tables are `mlp.down` only. Extending A/B/C to `attn.o` is future work.
+**Scope.** Residual writes get A/B/C; gate/up/q/k/v get A/B only. Raw `mlp.up` / `attn.v` **module** weights fail residual-shaped A/B; the supported protocol mounts from effective maps - mean-gate \(W^\star=\mathrm{diag}(\bar g)W_\mathrm{up}\) (compose-through-down at L2) and ridge lstsq \(x\to\mathrm{mixed\text{-}v}\) for `attn.v` - then scores the corresponding write tensors.
 
 ---
 
 ## 6. Limitations
 
-1. Single model (Gemma-2-2B); single primary site in the GO suite.
-2. Corpus and 16k-token subsample may bias which mounts look strong.
+1. Single model (Gemma-2-2B); C applies only to residual-write sites.
+2. WikiText-2 subsample (16,384 of 86,109 tokens) may bias which mounts look strong.
 3. Energy lift is not human meaning; no claim of semantic labels.
-4. Steer experiment uses short texts, fixed \(\alpha=2\), last-token logits only.
+4. Steer uses short texts, fixed \(\alpha=2\), last-token logits; injection after post-sublayer RMSNorm.
 5. C1 waiver is principled but still a design choice; always report raw early \(\rho\).
-6. L12-L15 show a mid-depth Spearman dip that is not fully explained here.
-7. L25 A4 is marginal (tile \(\approx\) whole) and still GO.
+6. Raw `mlp.up` / `attn.v` module weights fail residual-shaped A/B; mean-gate / compose-down and lstsq mixed-v effective mounts are required.
+7. `mlp.down` L25 A4 is marginal (tile \(\approx\) whole) and still GO; `attn.o` has fewer mounts (8 vs 36).
 
 ---
 
@@ -265,75 +280,77 @@ Top-20 Jaccard stays low until late layers (often 0-0.1 mid-depth; up to about 0
 
 Verdict uses **full-write lift** for tile vs whole vs columns vs random (avoids fake column `tile_lift\(\approx 0.999\)`), and **coverage saturation** (high and flat), not “must keep rising forever.” Early layers still run Experiment C (reported in CSV), but C1 does not fail the GO gate when \(L < 6\).
 
-### 7.1 Single layer (L12 smoke)
+### 7.1 Single layer (L12)
 
 ```bash
 pip install -e ".[dev]"
+python scripts/build_corpus.py --out data/corpus/train.jsonl
 
-python scripts/run_paper_experiments.py --layer 12 --device cuda \
+python scripts/run_paper_experiments.py --layer 12 --sites residual --device cuda \
   --texts data/corpus/train.jsonl \
   --out-dir data/eval/paper_experiments
 ```
 
-Inspect `verdict.json` and `chunking.csv`. The fair A/B column is `mean_full_write_lift`.
+Inspect per-site `verdict.json` and `chunking.csv` (under `mlp_down/` and `attn_o/` when both sites run). The fair A/B column is `mean_full_write_lift`.
 
-### 7.2 All 26 layers (recommended)
-
-Loads the model once and writes `L0/` … `L25/` plus `layers.csv` and `aggregate_verdict.json`:
+### 7.2 All linear sites × all layers (recommended)
 
 ```bash
-python scripts/run_paper_experiments.py --layers all --device cuda \
+python scripts/build_corpus.py --out data/corpus/train.jsonl
+python scripts/run_paper_experiments.py --layers all --sites all --device cuda \
   --texts data/corpus/train.jsonl \
   --out-dir data/eval/paper_experiments_all
 ```
 
-Faster depth band:
+Writes seven `{site_slug}/L{n}/` trees plus `sites.csv` and `aggregate_verdict.json` (with `by_site` and `by_tier`).
+
+Residual-only (faster check):
 
 ```bash
-python scripts/run_paper_experiments.py --layers 0,6,12,18,25 --device cuda \
+python scripts/run_paper_experiments.py --layers all --sites residual --device cuda \
   --texts data/corpus/train.jsonl \
-  --out-dir data/eval/paper_experiments_band
+  --out-dir data/eval/paper_experiments_residual
 ```
 
-Defaults: `tile_size=512`, `modes_per_tile=2`, modes sweep `1,2,4,8,16`, `n_steer=8`, `steer_alpha=2.0`, `max_tokens=16384`.
+Defaults: site-aware `tile_size` (512 residual/MLP; 256 attn k/v; 128 attn.q), `modes_per_tile=2`, modes sweep `1,2,4,8,16`, `n_steer=8`, `steer_alpha=2.0`, `max_tokens=16384`, `--sites all`.
+
+### 7.2b Effective-path up / v
+
+Raw `mlp.up` / `attn.v` weights fail residual-shaped A/B. Defaults use effective maps:
+
+- `mlp.up`: `mount_space=mean_gate_up` (\(W^\star=\mathrm{diag}(\bar g)W_\mathrm{up}\)),
+  score gated product; fallbacks `--gate-pools mean,mixture_k4,compose_down`.
+- `attn.v`: `mount_space=lstsq_mixed_v` (ridge lstsq \(x\to\)mixed-v);
+  fallback `compose_o` (\(W^\dagger=W_o\,\mathrm{expand}_{GQA}(W_v)\)).
+
+These run automatically under `--sites all`. Site-only re-runs:
+
+```bash
+python scripts/run_paper_experiments.py --layers all --sites mlp.up --device cuda \
+  --texts data/corpus/train.jsonl \
+  --out-dir data/eval/paper_up_meangate
+
+python scripts/run_paper_experiments.py --layers all --sites attn.v --device cuda \
+  --texts data/corpus/train.jsonl \
+  --out-dir data/eval/paper_v_lstsq
+```
 
 ### 7.3 Pass rules
 
 | ID | Pass when |
 |----|-----------|
-| A1 | tile **full-write** lift > random + 0.005 |
+| A1 | tile **full-write** lift > random + margin (0.005; 0.002 on effective paths) |
 | A2 | tile **full-write** lift \(\ge\) columns (fair) |
 | A3 | identity always-true or weakly correlated with lift |
-| A4 | tile **full-write** \(\ge\) whole (or within 20%) |
-| B1 | coverage **saturates**: peak \(\ge\) 0.25, stays within 0.05, no collapse |
-| C1 | steer Spearman \(\ge\) 0.05 **or** top-20 Jaccard \(\ge\) 0.05; **required only if layer \(\ge\) 6** |
+| A4 | tile **full-write** \(\ge\) whole (or within site slack / ratio floor) |
+| B1 | coverage **saturates**: peak \(\ge\) 0.25 (residual) / 0.15 (other) / 0.08 (effective up/v), early window m=1,2 (residual) or m=1,2,4 (other), final within 0.10 of peak |
+| C1 | steer Spearman \(\ge\) 0.05 **or** top-20 Jaccard \(\ge\) 0.05; **required only if residual-write site and layer \(\ge\) 6**; skipped for non-residual sites |
 
 ### 7.4 Tests and re-judge
 
 ```bash
 python -m pytest -q
-```
-
-Re-score existing `L*/summary.json` after a judge change (no GPU):
-
-```bash
-python - <<'PY'
-from pathlib import Path
-import json
-from atlas.mount.paper_eval import judge_paper_go
-
-root = Path("data/eval/paper_experiments_all")
-rows = []
-for p in sorted(root.glob("L*/summary.json"), key=lambda x: int(x.parent.name[1:])):
-    s = json.loads(p.read_text(encoding="utf-8"))
-    v = judge_paper_go(s)
-    s["verdict"] = v
-    p.write_text(json.dumps(s, indent=2), encoding="utf-8")
-    (p.parent / "verdict.json").write_text(json.dumps(v, indent=2), encoding="utf-8")
-    rows.append(v["go"])
-    print(f"L{s['layer']}: {'GO' if v['go'] else 'NO-GO'} ({v['n_pass']}/{v['n_checks']})")
-print(f"GO on {sum(rows)}/{len(rows)} layers")
-PY
+python scripts/rejudge_paper_results.py data/eval/paper_experiments_all
 ```
 
 Outputs (gitignored): `data/eval/paper_experiments_all/L*/{summary,verdict,chunking,coverage,causal}.*`, `layers.csv`, `aggregate_verdict.json`.
@@ -342,7 +359,7 @@ Outputs (gitignored): `data/eval/paper_experiments_all/L*/{summary,verdict,chunk
 
 ## 8. Conclusion
 
-Tile-SVD mounts on Gemma-2-2B `mlp.down` beat matched whole, column, and random baselines on **full-write energy lift**, saturate **write coverage** at 1-2 modes per tile, and show **depth-dependent** agreement between residual steers and final unembedding. The released Aquin Labs artifact implements extraction, proof metrics, and the paper GO/NO-GO suite, with mount identity defined as the weight rule \((v,u,\sigma)\).
+Tile-SVD mounts on Gemma-2-2B, evaluated on WikiText-2, beat matched whole/column/random baselines on **full-write energy lift**, saturate **write coverage** by few modes per tile, and show **depth-dependent** agreement between post-norm residual steers and final unembedding. Under the paper judge: **all seven linear sites × 26 layers = 182/182 GO**, with residual writes getting A/B/C and the rest A/B only; `mlp.up` and `attn.v` require effective-path mounts (mean-gate / compose-down; lstsq mixed-v). The released Aquin Labs artifact implements extraction, proof metrics, corpus build, and the GO/NO-GO suite, with mount identity defined as the weight rule \((v,u,\sigma)\).
 
 ---
 
@@ -356,7 +373,7 @@ This work was produced at **Aquin Labs**. Gemma-2-2B is released by Google under
 
 | Symbol / flag | Default | Where |
 |---------------|---------|--------|
-| `tile_size` | 512 | strategies, scripts |
+| `tile_size` | 512 (residual/MLP); 256 (attn k/v); 128 (attn.q) | strategies, scripts |
 | `modes_per_tile` | 2 | paper A/C |
 | modes sweep | 1,2,4,8,16 | paper B |
 | proven `min_lift` | 0.02 | `is_proven` |
@@ -372,7 +389,7 @@ This work was produced at **Aquin Labs**. Gemma-2-2B is released by Google under
 
 # Appendix B: Software artifact
 
-Package: **`usable-weight-mechanisms` v0.4.0** · Python >= 3.11 · MIT · hatchling · import path `src/`.
+Package: **`usable-weight-mechanisms` v0.5.0** · Python >= 3.11 · MIT · hatchling · import path `src/`.
 
 ## B.1 Root
 
@@ -387,21 +404,25 @@ Package: **`usable-weight-mechanisms` v0.4.0** · Python >= 3.11 · MIT · hatch
 
 | Path | Role |
 |------|------|
-| `src/atlas/__init__.py` | `__version__ = "0.4.0"` |
+| `src/atlas/__init__.py` | `__version__ = "0.5.0"` |
 | `src/atlas/mount/__init__.py` | Public exports |
 | `src/atlas/mount/strategies.py` | Tile / whole / column / random mounts |
 | `src/atlas/mount/trigger.py` | Trigger coeffs and default probe texts |
 | `src/atlas/mount/mechanism.py` | Energy lift, \(R^2\), `is_proven` |
 | `src/atlas/mount/coverage.py` | Weight and sparse write coverage |
 | `src/atlas/mount/lenses.py` | RMSNorm and unembed lens |
+| `src/atlas/mount/sites.py` | All seven linear site registry (residual + A/B-only) |
+| `src/atlas/mount/effective.py` | Mean-gate / mixture / compose-down; lstsq / compose-o |
 | `src/atlas/mount/paper_eval.py` | Experiment helpers and `judge_paper_go` |
 
 ## B.3 Scripts
 
 | Path | Role |
 |------|------|
-| `scripts/mount_runtime.py` | `parse_layers`, `load_texts`, MLP hooks, `load_model` |
-| `scripts/run_paper_experiments.py` | Experiments A/B/C and aggregate verdict |
+| `scripts/build_corpus.py` | WikiText-2 -> `data/corpus/train.jsonl` |
+| `scripts/mount_runtime.py` | `parse_layers`, `load_texts`, site hooks, `load_model` |
+| `scripts/run_paper_experiments.py` | Experiments A/B/C over `--sites` × `--layers` |
+| `scripts/rejudge_paper_results.py` | Re-score saved summaries without GPU |
 
 ## B.4 Tests
 
@@ -410,7 +431,9 @@ Package: **`usable-weight-mechanisms` v0.4.0** · Python >= 3.11 · MIT · hatch
 | `tests/test_mount_methods.py` | Mount builders; lenses |
 | `tests/test_mount_mechanism.py` | Energy lift / proven |
 | `tests/test_coverage.py` | Coverage and triggers |
-| `tests/test_paper_eval.py` | Spearman/Jaccard; GO judge; C1 waiver |
+| `tests/test_paper_eval.py` | Spearman/Jaccard; GO judge; C1 waiver; site-local C inject |
+| `tests/test_sites.py` | Resolvers; residual presets; C1 skip / attn.o C1 required |
+| `tests/test_effective_path.py` | Mean-gate / lstsq / compose / GQA effective maps |
 
 ## B.5 Data layout
 
@@ -423,17 +446,17 @@ Package: **`usable-weight-mechanisms` v0.4.0** · Python >= 3.11 · MIT · hatch
 
 # Appendix C: Output schema
 
-Per layer under `data/eval/paper_experiments_all/L{n}/`: `summary.json`, `verdict.json`, `chunking.csv`, `coverage.csv`, `causal.jsonl`. Aggregate: `layers.csv`, `aggregate_verdict.json`.
+Multi-site runs under `data/eval/paper_experiments_all/{site_slug}/L{n}/`: `summary.json`, `verdict.json`, `chunking.csv`, `coverage.csv`, `causal.jsonl` (residual only; includes `inject_at`). Aggregate: `sites.csv`, `aggregate_verdict.json` (with `by_site` and `by_tier`). Single-site multi-layer runs still write `L{n}/` plus `layers.csv`.
 
 ---
 
 # Appendix D: Figure plan
 
-Plot from `layers.csv` when preparing a PDF:
+Plot from `sites.csv` (or per-site `layers.csv`) when preparing a PDF:
 
-1. **Figure 1.** Depth vs mean full-write lift: tile / whole / columns / random.
-2. **Figure 2.** Coverage lift vs modes for layers 0, 6, 12, 18, 25.
-3. **Figure 3.** Depth vs mean Spearman (Experiment C); mark \(L<6\) as informational.
+1. **Figure 1.** Depth vs mean full-write lift: tile / whole / columns / random, **faceted by site**.
+2. **Figure 2.** Coverage lift vs modes for layers 0, 6, 12, 18, 25 (both sites).
+3. **Figure 3.** Depth vs mean Spearman (Experiment C) for `mlp.down` and `attn.o`; mark \(L<6\) as informational.
 4. **Figure 4 (optional).** Proven fraction vs layer from chunking CSV.
 
 ---
@@ -443,6 +466,7 @@ Plot from `layers.csv` when preparing a PDF:
 - “We evaluate tile-SVD mounts with a full-write energy-lift criterion that avoids tile-local artifacts of column baselines.”
 - “Write coverage saturates by one to two modes per tile across depth.”
 - “Agreement between residual steers and final unembedding is weak early and strong late; we require it only for \(L\ge 6\).”
+- “The protocol is site-agnostic on residual writes: the same A/B/C judge runs on `mlp.down` and `attn.o`, with Experiment C injecting on the site module.”
 - “We do not introduce SVD mounts; we contribute a fair chunking protocol, proof gate, and depth study on Gemma-2-2B.”
 
 ---

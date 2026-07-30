@@ -1,4 +1,4 @@
-"""Mechanism cards: prove (trigger v, write u, strength σ) on real MLP writes.
+"""Mechanism cards: prove (trigger v, write u, strength σ) on real site writes.
 
 Important: corr(a, <tile_write,u>)≈1 and slope≈σ are SVD *identities*
 (always true if u,v are singular vectors of W_tile). They are sanity checks only.
@@ -26,7 +26,7 @@ def tile_writes(
     col_start: int,
     col_end: int,
 ) -> np.ndarray:
-    """Residual write contributed by columns [start:end]: (n_tokens, d_model)."""
+    """Site write contributed by columns [start:end]: (n_tokens, d_out)."""
     w = _as_numpy(W).astype(np.float32, copy=False)
     x = np.asarray(intermediate, dtype=np.float32)
     if x.ndim == 1:
@@ -36,18 +36,30 @@ def tile_writes(
 
 
 def score_mount_mechanism(
-    mounts: list[RawMount],
+    mounts: list,
     *,
     W,
     intermediate: np.ndarray,
     writes: np.ndarray,
+    linear_writes: np.ndarray | None = None,
 ) -> list[dict[str, Any]]:
+    """Score mounts on site writes.
+
+    ``writes`` - tensor used for full-write energy (may be gated/mixed effective path).
+    ``linear_writes`` - raw ``W @ x`` (or module out); used for tile geometry / SVD
+    identity. Defaults to ``writes`` when the score space is the module itself.
+    """
     x = np.asarray(intermediate, dtype=np.float32)
     full_writes = np.asarray(writes, dtype=np.float32)
+    lin = np.asarray(
+        linear_writes if linear_writes is not None else writes, dtype=np.float32
+    )
     if x.ndim == 1:
         x = x.reshape(1, -1)
     if full_writes.ndim == 1:
         full_writes = full_writes.reshape(1, -1)
+    if lin.ndim == 1:
+        lin = lin.reshape(1, -1)
 
     w_np = _as_numpy(W)
     in_dim = int(w_np.shape[1])
@@ -62,9 +74,9 @@ def score_mount_mechanism(
 
     tile_r2: dict[tuple[int, int], float] = {}
     for (start, end), idxs in by_tile.items():
-        # Full-span tile == full writes — reuse to avoid a second giant matmul
+        # Full-span tile == linear module write - reuse to avoid a second matmul
         if start == 0 and end >= in_dim:
-            tw = full_writes
+            tw = lin
         else:
             tw = tile_writes(W, x, start, end)
         tile_cache[(start, end)] = tw
@@ -123,7 +135,7 @@ def score_mount_mechanism(
         rand_frac = float(np.mean((tw @ rand_u) ** 2 / tw_norm_sq))
         lift = mean_mode_frac - rand_frac
 
-        # Share of *full* MLP write energy along u (not just tile)
+        # Share of *full* score-write energy along u (gated/mixed/module)
         fw_norm_sq = np.sum(full_writes * full_writes, axis=1) + np.float32(1e-12)
         full_frac = float(np.mean((full_writes @ u) ** 2 / fw_norm_sq))
 
@@ -133,9 +145,6 @@ def score_mount_mechanism(
         if not np.any(strong):
             strong = np.ones(a.shape[0], dtype=bool)
 
-        # Cosine without allocating full (n, d) pred: use proj/||tw|| vs σ a / ||tw||
-        # pred = (a*σ) u  ⇒ cos(pred, tw) = (a*σ)(tw·u) / (||pred|| ||tw||)
-        # ||pred|| = |a*σ|, tw·u = proj
         denom = (np.abs(a * np.float32(sigma)) * np.sqrt(tw_norm_sq)) + np.float32(1e-12)
         cos_tok = (a * np.float32(sigma) * proj) / denom
         cos_strong = float(np.mean(cos_tok[strong]))
@@ -150,11 +159,9 @@ def score_mount_mechanism(
                 "singular_value": round(sigma, 6),
                 "peak_abs_trigger": round(float(abs_a.max()), 6),
                 "mean_abs_trigger": round(float(abs_a.mean()), 6),
-                # sanity (SVD identity)
                 "svd_identity_corr": round(corr, 4),
                 "svd_identity_slope_err": round(slope_err, 4),
                 "svd_identity_ok": svd_ok,
-                # real proof
                 "mode_energy_fraction": round(mean_mode_frac, 4),
                 "random_energy_fraction": round(rand_frac, 4),
                 "energy_lift_over_random": round(lift, 4),
